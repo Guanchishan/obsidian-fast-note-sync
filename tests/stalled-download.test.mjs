@@ -46,4 +46,20 @@ assert.ok(!removed.includes('.plugin/temp-chunks'), 'must never remove the whole
 assert.deepEqual(removed.sort(), ['.plugin/temp-chunks/init_hash', '.plugin/temp-chunks/stale-id']);
 // Throttled: an immediate second sweep does nothing
 assert.equal(await sweepStalledDownloadSessions(plugin, 0, now + 1000), 0);
+
+// Cleanup failure must still release the slot and record the failure and page
+{
+  const rel = [], done = [];
+  const p2 = { ...plugin, fileSyncTasks: { failed: 0 },
+    fileDownloadSessions: new Map([['x', { path: 'x.bin', sessionId: 'x', totalChunks: 2, size: 1, pageIndex: 7,
+      tempDir: '.plugin/temp-chunks/x', downloadedChunks: new Set(), lastActivityAt: now }]]),
+    app: { vault: { adapter: { exists: async () => true, rmdir: async () => { throw new Error('EBUSY'); } } } },
+    recordSyncCompleted: (type, page) => done.push([type, page]),
+    concurrencyLimiter: { releaseSlot: key => rel.push(key) } };
+  assert.equal(await sweepStalledDownloadSessions(p2, 120000, now + 200000), 1);
+  assert.equal(p2.fileDownloadSessions.size, 0);
+  assert.deepEqual(rel, ['download_x.bin']);
+  assert.deepEqual(done, [['file', 7]]);
+  assert.equal(p2.fileSyncTasks.failed, 1);
+}
 console.log('stalled download watchdog tests passed');
