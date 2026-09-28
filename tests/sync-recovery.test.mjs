@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 
 const noop = () => {};
+class MockFile {}
 const helpers = { dump: noop, dumpError: noop, isPathExcluded: () => false,
   hashContent: x => x, hashContentAsync: async x => x, getPluginDir: () => '.plugin',
   checkAndNotifyCaseConflict: () => false };
@@ -16,7 +17,7 @@ function load(file, extra = {}, globals = {}) {
   vm.runInNewContext(code, { module, exports: module.exports, console,
     window: { setTimeout: fn => { fn(); return 1; }, clearTimeout: noop },
     ...globals,
-    require: id => id === 'obsidian' ? { normalizePath: x => x, TFile: class {}, Platform: { isMobile: false } }
+    require: id => id === 'obsidian' ? { normalizePath: x => x, TFile: MockFile, Platform: { isMobile: false } }
       : id.includes('helpers') ? helpers
       : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => logs } }
       : extra[id] || {} });
@@ -143,3 +144,82 @@ console.log('PASS: queue recovery, mtime ACK release/page attribution/context ro
   assert.equal(closed, opened, 'every scan yield must close both MessagePorts');
   console.log('PASS: 100 scan yields release all 200 MessagePorts');
 }
+
+{
+  const actions = new Proxy({}, { get: (_, key) => key });
+  const received = [];
+  const { WebSocketManager } = load('src/lib/sync/websocket_manager.ts', {
+    './websocket_action': actions,
+    './operator': { receiveOperators: new Map([['FileSyncUpdate', x => received.push(x)]]) }
+  });
+  const manager = Object.create(WebSocketManager.prototype);
+  manager.client = { notifyActivity: noop };
+  manager.plugin = { settings: { vault: 'test' }, syncState: { activeSyncContext: 'one' } };
+  const packet = { code: 200, context: 'one', pageIndex: 16, data: { path: 'file.png' } };
+  for (let i = 0; i < 1000; i++) manager.handleStructuredMessage('FileSyncUpdate', packet);
+  assert.equal(received.length, 1, '1000 retransmissions must enqueue one download');
+  manager.handleStructuredMessage('FileSyncUpdate', { ...packet, pageIndex: 0 });
+  assert.equal(received.length, 2, 'live updates are not discarded');
+  manager.plugin.syncState.activeSyncContext = 'two';
+  manager.handleStructuredMessage('FileSyncUpdate', { ...packet, context: 'two' });
+  assert.equal(received.length, 3, 'new context must process same path again');
+}
+{
+  Object.assign(helpers, { isLargeBinarySyncRisk: () => false, logMemorySnapshot: noop,
+    hashFileAsync: async () => 'hash', sleep: async () => {}, getSafeCtime: () => 1 });
+  const timers = new Map(); let timerId = 0;
+  const fileOps = load('src/lib/sync/operator_file.ts', {}, {
+    TextEncoder, window: { setTimeout: fn => { timers.set(++timerId, fn); return timerId; },
+      clearTimeout: id => timers.delete(id) }
+  });
+  const file = Object.assign(new MockFile(), { path: 'file.png', stat: { size: 3, mtime: 2, ctime: 1 } });
+  const sends = [], completed = [];
+  const p = {
+    settings: { syncEnabled: true, concurrencyControlEnabled: true, maxConcurrentUploads: 1 },
+    syncState: { activeSyncContext: 'one', pendingFilePushPageIndex: new Map() },
+    app: { vault: { getFileByPath: () => file, getName: () => 'test', readBinary: async () => new Uint8Array([1,2,3]).buffer },
+      loadLocalStorage: noop, saveLocalStorage: noop },
+    pendingUploadHashes: new Map(), pendingFileDeleteAcks: new Set(), lastSyncMtime: new Map(),
+    fileHashManager: { getPathHash: () => null, getValidHash: () => 'hash', setFileHash: noop },
+    localStorageManager: { savePending: noop, getMetadata: () => 0, setMetadata: noop },
+    lockManager: { withLock: async (_, fn) => fn() }, addIgnoredFile: noop, removeIgnoredFile: noop,
+    totalChunksToUpload: 0, uploadedChunksCount: 0, fileSyncTasks: { failed: 0 },
+    recordSyncCompleted: (type, page) => completed.push([type, page]),
+    websocket: { isOpen: true, SendMessage: async (...args) => sends.push(args),
+      SendBinary: async (_frame, _prefix, before, after) => { if (!before()) after(); } }
+  };
+  p.concurrencyLimiter = new ConcurrencyLimiter(p);
+  const flush = async () => { for (let i=0; i<30; i++) await Promise.resolve(); };
+  await fileOps.receiveFileUpload({ path: file.path, pathHash: 'pathhash', sessionId: 'a'.repeat(36), pageIndex: 15 }, p);
+  await flush();
+  fileOps.receiveFileUploadSessionNotFound('a'.repeat(36), p);
+  await flush();
+  assert.equal(sends.length, 1, 'late expired-session error must renew the upload');
+  assert.equal(sends[0][0], 'FileUploadCheck');
+  assert.equal(completed.length, 0, 'expired session must not count as successful completion');
+  await fileOps.receiveFileUpload({ path: file.path, pathHash: 'pathhash', sessionId: 'b'.repeat(36) }, p);
+  await flush();
+  assert.equal(p.concurrencyLimiter.queue.length, 0, 'upload check hands off its slot without deadlocking at capacity');
+  fileOps.receiveFileUploadAck({ path: file.path, pathHash: 'pathhash' }, p);
+  assert.deepEqual(completed, [['file', 15]], 'renewal preserves original page attribution');
+  assert.equal(timers.size, 0, 'ACK clears watchdog');
+  assert.equal(p.concurrencyLimiter.activeKeys.size, 0);
+  fileOps.receiveFileUploadSessionNotFound('a'.repeat(36), p);
+  await flush();
+  assert.equal(sends.length, 1, 'late old-session errors are inert');
+  await fileOps.receiveFileUpload({ path: file.path, pathHash: 'pathhash', sessionId: 'c'.repeat(36), pageIndex: 16 }, p);
+  await flush();
+  for (let i = 0; i < 3; i++) {
+    const [id, callback] = timers.entries().next().value;
+    timers.delete(id);
+    callback();
+    await flush();
+  }
+  assert.equal(p.fileSyncTasks.failed, 1, 'missing ACK must stop after two recovery attempts');
+  assert.equal(p.concurrencyLimiter.activeKeys.size, 0, 'retry exhaustion releases capacity');
+  assert.equal(timers.size, 0, 'retry exhaustion leaves no watchdog loop');
+  assert.deepEqual(completed.at(-1), ['file', 16]);
+  fileOps.clearUploadQueue();
+}
+console.log('PASS: retransmission deduplication, late session errors, renewal, slot handoff and ACK cleanup');
+
