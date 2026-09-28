@@ -28,6 +28,9 @@ export class ConcurrencyLimiter {
             return true;
         }
 
+        // FileUploadCheck hands its existing slot to FileUpload.
+        if (this.activeKeys.has(key)) return true;
+
         if (this.activeKeys.size < this.plugin.settings.maxConcurrentUploads) {
             this.activeKeys.add(key);
             if (isFifo) this.fifoKeys.push(key);
