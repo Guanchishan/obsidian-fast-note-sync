@@ -103,7 +103,16 @@ const formatDownloadError = (e: unknown) => {
 const cleanupFileDownloadSession = async (plugin: FastSync, session: FileDownloadSession, failed = false) => {
   releaseSessionMemory(session)
   plugin.fileDownloadSessions.delete(session.sessionId)
-  if (session.tempDir) await clearTempChunksDir(plugin, session.sessionId)
+  // 清理临时目录失败不能中断记账：否则会话已移除，但失败计数、页完成与名额释放都会丢失
+  // A temp-dir cleanup failure must not abort bookkeeping; otherwise the session is gone but
+  // the failure count, page completion and slot release are all lost
+  if (session.tempDir) {
+    try {
+      await clearTempChunksDir(plugin, session.sessionId)
+    } catch (e) {
+      dumpError(`Temp chunk cleanup failed for session ${session.sessionId}`, e)
+    }
+  }
   if (failed) plugin.fileSyncTasks.failed++
   plugin.recordSyncCompleted('file', session.pageIndex)
 }
