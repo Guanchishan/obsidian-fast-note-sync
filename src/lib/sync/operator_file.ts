@@ -13,7 +13,7 @@ let currentDownloadBufferBytes = 0
 const MAX_DOWNLOAD_BUFFER_BYTES = 20 * 1024 * 1024
 
 // 上传中的文件追踪，用于删除时取消上传
-const activeUploadsMap = new Map<string, { cancelled: boolean }>()
+const activeUploadsMap = new Map<string, { cancelled: boolean; checkpointKey?: string }>()
 
 // 全局中止信号，用于插件卸载时
 export let isPluginUnloading = false;
@@ -35,6 +35,26 @@ function clearUploadTracking(path: string): void {
   const id = pathToSessionIdMap.get(path)
   if (id) sessionIdToPathMap.delete(id)
   pathToSessionIdMap.delete(path)
+}
+
+/** Cancel an upload superseded by a local delete or rename and settle its sync-page item. */
+function cancelActiveUpload(path: string, plugin: FastSync): boolean {
+  const active = activeUploadsMap.get(path)
+  if (!active) return false
+
+  active.cancelled = true
+  const checkpointKey = active.checkpointKey
+  const pageIndex = plugin.syncState.pendingFilePushPageIndex.get(path)
+  plugin.syncState.pendingFilePushPageIndex.delete(path)
+  clearUploadTracking(path)
+  uploadRetries.delete(path)
+  uploadContexts.delete(path)
+  if (checkpointKey) {
+    try { plugin.app.saveLocalStorage(checkpointKey, null) } catch { /* ignore */ }
+  }
+  plugin.concurrencyLimiter.releaseSlot(path)
+  if (pageIndex !== undefined) plugin.recordSyncCompleted('file', pageIndex)
+  return true
 }
 
 function armUploadAckTimeout(path: string, plugin: FastSync): void {
@@ -336,7 +356,7 @@ export const fileDelete = async function (file: TAbstractFile, plugin: FastSync,
   await plugin.lockManager.withLock(file.path, async () => {
     // 如果该文件正在上传或在队列中，则标记为取消，且不再发送服务端删除消息
     if (activeUploadsMap.has(file.path)) {
-      activeUploadsMap.get(file.path)!.cancelled = true;
+      cancelActiveUpload(file.path, plugin)
       dump(`Upload cancelled due to file deletion: ${file.path}`);
       // 仅清理本地状态
       plugin.fileHashManager.removeFileHash(file.path)
@@ -385,7 +405,7 @@ export const fileDeleteByPath = async function (filePath: string, plugin: FastSy
     // 如果该文件正在上传或在队列中，则标记为取消，且不再发送服务端删除消息
     // If the file is being uploaded or in the queue, cancel and skip server delete
     if (activeUploadsMap.has(filePath)) {
-      activeUploadsMap.get(filePath)!.cancelled = true;
+      cancelActiveUpload(filePath, plugin)
       plugin.fileHashManager.removeFileHash(filePath)
       plugin.pendingUploadHashes.delete(filePath)
       plugin.localStorageManager.savePending('pendingUploadHashes', plugin.pendingUploadHashes)
@@ -461,7 +481,7 @@ export const fileRename = async function (file: TAbstractFile, oldfile: string, 
 
       // 如果旧文件正在上传，则取消上传且不发送删除消息
       if (activeUploadsMap.has(oldfile)) {
-        activeUploadsMap.get(oldfile)!.cancelled = true;
+        cancelActiveUpload(oldfile, plugin)
         // 重新上传
         void fileModify(file, plugin)
         dump(`Upload cancelled due to file rename: ${oldfile}`);
@@ -552,18 +572,17 @@ export const receiveFileUpload = async function (data: FileUploadMessage, plugin
   const runUpload = async () => {
     // 标记该路径进入活跃上传状态
     if (!await plugin.concurrencyLimiter.waitForSlot(data.path, false, 10)) return;
+    const vaultName = plugin.app.vault.getName()
+    const checkpointKey = `fns-${vaultName}-uploadSession-${data.pathHash}`
     const previousTimer = uploadAckTimers.get(data.path)
     if (previousTimer !== undefined) window.clearTimeout(previousTimer)
     uploadAckTimers.delete(data.path)
-    const uploadState = { cancelled: false };
+    const uploadState = { cancelled: false, checkpointKey };
     activeUploadsMap.set(data.path, uploadState);
     uploadContexts.set(data.path, plugin.syncState.activeSyncContext);
 
     // 断点续传 checkpoint key，提升到 try 外以便 catch 块中也能清除
     // Resume checkpoint key hoisted outside try so the catch block can also remove it
-    const vaultName = plugin.app.vault.getName()
-    const checkpointKey = `fns-${vaultName}-uploadSession-${data.pathHash}`
-
     try {
       // 延迟到任务排到时才读取文件内容, 减少内存积压
       let content: ArrayBuffer | null = null;
@@ -715,7 +734,16 @@ export const receiveFileUpload = async function (data: FileUploadMessage, plugin
         }
 
         // 如果被取消,立即退出循环并释放槽位
-        if (uploadState.cancelled) return; // Recovery/ACK already owns cleanup; do not release its replacement slot.
+        if (uploadState.cancelled) {
+          // Deletion/recovery settled the old task. A delayed send callback may
+          // have written its checkpoint after cleanup; clear it unless a newer
+          // session for this path now owns that checkpoint.
+          const currentSessionId = pathToSessionIdMap.get(data.path)
+          if (!currentSessionId || currentSessionId === data.sessionId) {
+            try { plugin.app.saveLocalStorage(checkpointKey, null) } catch { /* ignore */ }
+          }
+          return; // The cancellation owner already released or replaced this slot.
+        }
         if (sendResult === 'cancelled' || isPluginUnloading) {
           // 取消时清除 checkpoint，避免使用已失效的会话
           // Clear checkpoint on cancel to avoid stale session reuse

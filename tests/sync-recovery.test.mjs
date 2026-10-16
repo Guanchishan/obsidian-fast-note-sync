@@ -221,5 +221,63 @@ console.log('PASS: queue recovery, mtime ACK release/page attribution/context ro
   assert.deepEqual(completed.at(-1), ['file', 16]);
   fileOps.clearUploadQueue();
 }
-console.log('PASS: retransmission deduplication, late session errors, renewal, slot handoff and ACK cleanup');
 
+{
+  Object.assign(helpers, { isLargeBinarySyncRisk: () => false, logMemorySnapshot: noop,
+    hashFileAsync: async () => 'hash', sleep: async () => {}, getSafeCtime: () => 1 });
+  const timers = new Map(); let timerId = 0;
+  const fileOps = load('src/lib/sync/operator_file.ts', {}, {
+    TextEncoder, window: { setTimeout: fn => { timers.set(++timerId, fn); return timerId; },
+      clearTimeout: id => timers.delete(id) }
+  });
+  const file = Object.assign(new MockFile(), { path: 'deleted.png', stat: { size: 3, mtime: 2, ctime: 1 } });
+  const completed = [], saved = [];
+  let finishChunk;
+  let notifyChunkStarted;
+  const chunkStarted = new Promise(resolve => { notifyChunkStarted = resolve; });
+  const p = {
+    settings: { syncEnabled: true, concurrencyControlEnabled: true, maxConcurrentUploads: 1 },
+    syncState: { activeSyncContext: 'delete-test', pendingFilePushPageIndex: new Map() },
+    app: { vault: { getFileByPath: () => file, getName: () => 'test',
+      readBinary: async () => new Uint8Array([1, 2, 3]).buffer },
+      loadLocalStorage: () => undefined,
+      saveLocalStorage: (...args) => saved.push(args) },
+    pendingUploadHashes: new Map(), pendingFileDeleteAcks: new Set(), lastSyncMtime: new Map(),
+    lastSyncPathDeleted: new Set(),
+    fileHashManager: { getPathHash: () => null, getValidHash: () => 'hash', setFileHash: noop, removeFileHash: noop },
+    localStorageManager: { savePending: noop, getMetadata: () => 0, setMetadata: noop },
+    lockManager: { withLock: async (_, fn) => fn() }, addIgnoredFile: noop, removeIgnoredFile: noop,
+    totalChunksToUpload: 0, uploadedChunksCount: 0, fileSyncTasks: { failed: 0 },
+    recordSyncCompleted: (type, page) => completed.push([type, page]),
+    websocket: { isOpen: true, SendMessage: async () => {},
+      SendBinary: async (_frame, _prefix, before, after) => {
+        if (before()) return 'cancelled';
+        notifyChunkStarted();
+        return new Promise(resolve => { finishChunk = () => { after(); resolve('sent'); }; });
+      } }
+  };
+  p.concurrencyLimiter = new ConcurrencyLimiter(p);
+  await fileOps.receiveFileUpload({ path: file.path, pathHash: 'pathhash', sessionId: 'd'.repeat(36),
+    chunkSize: 1, pageIndex: 27 }, p);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  await chunkStarted;
+  assert.equal(p.concurrencyLimiter.activeKeys.size, 1);
+  let queuedAcquired = false;
+  const queuedTask = p.concurrencyLimiter.waitForSlot('next-upload').then(acquired => { queuedAcquired = acquired; });
+
+  await fileOps.fileDelete(file, p);
+  await queuedTask;
+  assert.equal(queuedAcquired, true, 'deleting an in-flight upload releases capacity for the next file');
+  assert.equal(p.concurrencyLimiter.activeKeys.has('next-upload'), true);
+  assert.deepEqual(completed, [['file', 27]], 'the deleted upload settles its original sync-page item once');
+  assert.equal(p.syncState.pendingFilePushPageIndex.has(file.path), false);
+  assert.equal(p.pendingUploadHashes.has(file.path), false);
+  finishChunk();
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.deepEqual(completed, [['file', 27]], 'the cancelled send does not complete the page twice');
+  assert.equal(p.concurrencyLimiter.activeKeys.has('next-upload'), true, 'old upload cleanup preserves the next file slot');
+  assert.deepEqual(saved.at(-1), ['fns-test-uploadSession-pathhash', null],
+    'a delayed chunk callback cannot restore the deleted upload checkpoint');
+  fileOps.clearUploadQueue();
+}
+console.log('PASS: retransmission deduplication, late session errors, renewal, slot handoff and ACK cleanup');
