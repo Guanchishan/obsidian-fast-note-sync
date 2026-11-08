@@ -1,5 +1,6 @@
 import { moment, Platform, normalizePath } from "obsidian";
 
+import { FORK_BUILD } from "../utils/fork_build";
 import { invalidateFileDownloads, handleFileChunkDownload, BINARY_PREFIX_FILE_SYNC, clearUploadQueue, receiveFileUploadSessionNotFound } from "./operator_file";
 import { dump, addRandomParam, showSyncNotice, safeStringify, getPluginDir, hashContent } from "../utils/helpers";
 import { enSendDTOToProtobuf, deReceivePacket } from "../../pb/protobuf_mapper";
@@ -151,7 +152,10 @@ export class WebSocketManager {
           "&clientVersion=" +
           clientVersion +
           useProtoParam +
-          negotiationParams
+          negotiationParams +
+          // Unknown query parameters are ignored by the server; this makes the build visible
+          // in the connection log line on every device.
+          "&forkBuild=" + FORK_BUILD
         );
       },
       preConnectProbe: async () => {
@@ -179,6 +183,7 @@ export class WebSocketManager {
           this.plugin.syncState.activeSyncContext = null;
         }
         this.receivedFileDetails.clear();
+        // Downloads requested on the closed connection may no longer commit.
         invalidateFileDownloads(this.plugin);
         clearUploadQueue();
         this.plugin.concurrencyLimiter.clear();

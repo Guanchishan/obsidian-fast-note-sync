@@ -31,6 +31,7 @@ import { $ } from "./i18n/lang";
 import { SsoImportModal } from "./views/sso-import-modal";
 import { StatusBarManager } from "./lib/ui/status_bar_manager";
 import { SyncProgressTracker } from "./lib/sync/sync_progress_tracker";
+import { FORK_BUILD } from "./lib/utils/fork_build";
 
 
 
@@ -365,6 +366,8 @@ export default class FastSync extends Plugin {
       checkAndNotifyCaseConflict,
       DebugLogManager
     };
+
+    dump(`Fast Note Sync ${this.manifest.version}, fork build ${FORK_BUILD}`)
 
     // 注册自定义颜色图标 / Register custom colored icons
     resetFileOperations()
@@ -814,10 +817,24 @@ export default class FastSync extends Plugin {
     }
   }
 
+  private applyingExternalSettings = false
+
   async onExternalSettingsChange() {
     dump("onExternalSettingsChange")
-    await this.loadSettings()
-    await this.saveSettings()
+    // Saving unconditionally rewrote data.json (and the token cache) on every external change.
+    // With iCloud or config sync touching data.json, that write could raise another external
+    // change, producing a continuous save loop. Save only when the loaded settings differ.
+    if (this.applyingExternalSettings) return
+    this.applyingExternalSettings = true
+    try {
+      const before = JSON.stringify(this.settings)
+      await this.loadSettings()
+      if (JSON.stringify(this.settings) !== before) {
+        await this.saveSettings()
+      }
+    } finally {
+      this.applyingExternalSettings = false
+    }
   }
 
   async saveSettings() {

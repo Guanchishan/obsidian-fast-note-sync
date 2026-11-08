@@ -16,12 +16,12 @@ for (const initialized of [false, true]) {
   for (const [restricted, path, skip] of [[false, 'a.zip', true], [true, 'a.PDF', true], [true, 'a.zip', false]]) {
     let slots = 0, completed = 0, sends = 0;
     const plugin = {
-      app: { vault: { getFileByPath: () => null } },
       settings: { syncEnabled: true, cloudPreviewEnabled: true, cloudPreviewTypeRestricted: restricted },
       pendingFileDeleteAcks: new Map(),
       localStorageManager: { getMetadata: () => initialized },
       recordSyncCompleted: () => completed++,
       fileDownloadSessions: new Map(),
+      app: { vault: { getFileByPath: () => null } },
       totalFilesToDownload: 0,
       websocket: { SendMessage: async () => { sends++; } },
       concurrencyLimiter: { waitForSlot: async () => { slots++; return true; }, releaseSlot() {} },
@@ -35,7 +35,6 @@ for (const initialized of [false, true]) {
 }
 let released = 0, completed = 0, sends = 0;
 const plugin = {
-  app: { vault: { getFileByPath: () => null } },
   settings: { syncEnabled: true, cloudPreviewEnabled: false, cloudPreviewTypeRestricted: true }, pendingFileDeleteAcks: new Map(),
   recordSyncCompleted: () => completed++,
   fileDownloadSessions: new Map(), totalFilesToDownload: 0,

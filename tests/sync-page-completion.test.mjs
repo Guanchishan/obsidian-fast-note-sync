@@ -20,7 +20,7 @@ function load(file, extra = {}, globals = {}) {
     require: id => id === 'obsidian' ? { normalizePath: x => x, TFile: MockFile, Platform: { isMobile: false } }
       : id.includes('helpers') ? helpers
       : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => logs } }
-      : extra[id] || {} });
+      : extra[id] || (id.includes('operator_file') ? { sweepStalledDownloadSessions: async () => 0 } : {}) });
   return module.exports;
 }
 
@@ -59,8 +59,8 @@ console.log('PASS: negotiated page completion');
       expectedSyncCount: 4, localStorageManager: { getMetadata: key => metadata.get(key), setMetadata: (key,value) => metadata.set(key,value) }
     };
     checkSyncCompletion(p);
-    assert.equal(metadata.has('isInitSync'), failed === 0);
+    assert.equal(metadata.get('isInitSync'), true, 'a completed round enables incremental startup even with failures');
     assert.equal(metadata.has('lastSyncSuccessTime'), failed === 0);
   }
 }
-console.log('PASS: failed rounds preserve success metadata; successful rounds still update it');
+console.log('PASS: failed rounds preserve lastSyncSuccessTime but still finish initial sync');

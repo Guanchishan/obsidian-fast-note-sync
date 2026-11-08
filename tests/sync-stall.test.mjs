@@ -12,7 +12,8 @@ vm.runInNewContext(code, { module, exports: module.exports, console, window: { s
   require: id => id === 'obsidian' ? { normalizePath: x => x, TFile: class {}, Platform: {} }
     : id.includes('helpers') ? { dump: noop }
     : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => ({ addOrUpdateLog: noop }) } }
-    : id.includes('i18n') ? { $: k => k } : {} });
+    : id.includes('i18n') ? { $: k => k }
+    : id.includes('operator_file') ? { sweepStalledDownloadSessions: async () => 0 } : {} });
 const { isSyncStalled, SYNC_STALL_RESTART_MS } = module.exports;
 
 const mk = () => ({
@@ -47,4 +48,52 @@ assert.equal(isSyncStalled(q, 'ctx2', t0 + 10 * SYNC_STALL_RESTART_MS), false);
 const r = mk();
 isSyncStalled(r, 'a', t0);
 assert.equal(isSyncStalled(r, 'b', t0 + 10 * SYNC_STALL_RESTART_MS), false);
+
+// Exercise the full completion check: long-running active work must not be
+// forced complete by the old wall-clock timeout before the idle watchdog runs.
+let now = 50_000_000;
+class FakeDate extends Date {
+  static now() { return now; }
+}
+const integrationModule = { exports: {} };
+const integrationCode = ts.transpileModule(fs.readFileSync('src/lib/sync/operator.ts', 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+}).outputText;
+vm.runInNewContext(integrationCode, {
+  module: integrationModule,
+  exports: integrationModule.exports,
+  console,
+  Date: FakeDate,
+  WebSocket: { OPEN: 1 },
+  window: { setTimeout: () => 1, clearInterval: noop },
+  require: id => id === 'obsidian' ? { normalizePath: x => x, TFile: class {}, TFolder: class {} }
+    : id.includes('helpers') ? { dump: noop }
+    : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => ({ addOrUpdateLog: noop }) } }
+    : id.includes('i18n') ? { $: key => key }
+    : id.includes('operator_file') ? { sweepStalledDownloadSessions: async () => 0 }
+    : {},
+});
+const { checkSyncCompletion } = integrationModule.exports;
+const statusUpdates = [];
+const failIfReset = () => { throw new Error('active long-running sync must not be reset'); };
+const longRunning = {
+  syncState: { activeSyncContext: 'long-running', progressCheckIntervalId: 1 },
+  settings: { syncEnabled: true, configSyncEnabled: false, isShowNotice: false },
+  noteSyncTasks: { completed: 4, failed: 0 }, fileSyncTasks: { completed: 2, failed: 0 },
+  folderSyncTasks: { completed: 0, failed: 0 }, configSyncTasks: { completed: 0, failed: 0 },
+  concurrencyLimiter: { activeKeys: new Set(['uploading.bin']), queue: [] },
+  fileDownloadSessions: new Map(), isSyncRequesting: false, isSyncing: true,
+  websocket: { ws: { readyState: 1, bufferedAmount: 0 }, isOpen: true },
+  progressTracker: { getOverallPct: () => 42, getDetailText: () => '',
+    isTypeFullyDone: () => false, forceComplete: failIfReset },
+  syncPageStateMap: new Map(), resetSyncTasks: failIfReset,
+  updateStatusBar: (...args) => statusUpdates.push(args),
+};
+const startedAt = now - 6 * 60 * 60 * 1000;
+checkSyncCompletion(longRunning, 1, startedAt, 'long-running');
+now += 6 * 60 * 60 * 1000;
+checkSyncCompletion(longRunning, 1, startedAt, 'long-running');
+assert.equal(longRunning.syncState.activeSyncContext, 'long-running');
+assert.equal(longRunning.isSyncing, true);
+assert.equal(statusUpdates.length, 2, 'ongoing transfer remains visible after six hours');
 console.log('sync stall watchdog tests passed');
