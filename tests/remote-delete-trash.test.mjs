@@ -22,6 +22,7 @@ function load(file) {
     require: id => id === 'obsidian' ? { TFile, TFolder, normalizePath: x => x.replace(/\\/g, '/') }
       : id.includes('helpers_obsidian_bypass') ? { ...helpers, vaultDelete: forbidden }
       : id.includes('helpers') ? { ...helpers, vaultDelete: forbidden }
+      : id.includes('remote_path_guard') ? { blockAliasedRemoteMutation: () => false }
       : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => ({ addLog: noop }) } }
       : {} });
   return module.exports;

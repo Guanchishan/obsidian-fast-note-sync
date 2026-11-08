@@ -12,7 +12,8 @@ vm.runInNewContext(code, { module, exports: module.exports, console, window: { s
   require: id => id === 'obsidian' ? { normalizePath: x => x, TFile: class {}, Platform: {} }
     : id.includes('helpers') ? { dump: noop }
     : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => ({ addOrUpdateLog: noop }) } }
-    : id.includes('i18n') ? { $: k => k } : {} });
+    : id.includes('i18n') ? { $: k => k }
+    : id.includes('operator_file') ? { sweepStalledDownloadSessions: async () => 0 } : {} });
 const { isSyncStalled, SYNC_STALL_RESTART_MS } = module.exports;
 
 const mk = () => ({
@@ -69,6 +70,7 @@ vm.runInNewContext(integrationCode, {
     : id.includes('helpers') ? { dump: noop }
     : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => ({ addOrUpdateLog: noop }) } }
     : id.includes('i18n') ? { $: key => key }
+    : id.includes('operator_file') ? { sweepStalledDownloadSessions: async () => 0 }
     : {},
 });
 const { checkSyncCompletion } = integrationModule.exports;

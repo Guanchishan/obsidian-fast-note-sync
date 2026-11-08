@@ -20,7 +20,7 @@ function load(file, extra = {}, globals = {}) {
     require: id => id === 'obsidian' ? { normalizePath: x => x, TFile: MockFile, Platform: { isMobile: false } }
       : id.includes('helpers') ? helpers
       : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => logs } }
-      : extra[id] || {} });
+      : extra[id] || (id.includes('operator_file') ? { sweepStalledDownloadSessions: async () => 0 } : {}) });
   return module.exports;
 }
 const { ConcurrencyLimiter } = load('src/lib/sync/concurrency_limiter.ts');
@@ -35,6 +35,11 @@ const { ConcurrencyLimiter } = load('src/lib/sync/concurrency_limiter.ts');
     settings: { syncEnabled: true, configSyncEnabled: true },
     websocket: { ws: { readyState: 1, bufferedAmount: 0 } },
     fileDownloadSessions: new Map(),
+    // Counters move each check so the stall watchdog sees progress, not a stall.
+    noteSyncTasks: { completed: 0, failed: 0 }, fileSyncTasks: { completed: 0, failed: 0 },
+    folderSyncTasks: { completed: 0 }, configSyncTasks: { completed: 0 },
+    uploadedChunksCount: 0, downloadedChunksCount: 0,
+    concurrencyLimiter: { activeKeys: new Set(['busy']), queue: [] },
     progressTracker: { isTypeFullyDone: () => false, getOverallPct: () => 100,
       getDetailText: () => 'pending uploads', forceComplete: fail },
     resetSyncTasks: fail,
