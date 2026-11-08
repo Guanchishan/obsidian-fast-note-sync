@@ -11,6 +11,7 @@ import { $ } from "../../i18n/lang";
 import FastSync from "../../main";
 import { StatusBarManager } from './status_bar_manager';
 import { SyncLogManager } from '../sync/sync_log_manager';
+import { FORK_BUILD } from '../utils/fork_build';
 
 
 
@@ -679,7 +680,7 @@ export class MenuManager {
       };
 
       menu.addItem((item: MenuItem) => {
-        const title = $("ui.menu.plugin") + ": v" + this.plugin.manifest.version;
+        const title = $("ui.menu.plugin") + ": v" + this.plugin.manifest.version + " (fork " + FORK_BUILD + ")";
         item.setTitle(title)
           .setIcon("info")
           .onClick(onPluginVersionClick);

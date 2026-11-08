@@ -31,6 +31,7 @@ import { $ } from "./i18n/lang";
 import { SsoImportModal } from "./views/sso-import-modal";
 import { StatusBarManager } from "./lib/ui/status_bar_manager";
 import { SyncProgressTracker } from "./lib/sync/sync_progress_tracker";
+import { FORK_BUILD } from "./lib/utils/fork_build";
 
 
 
@@ -365,6 +366,8 @@ export default class FastSync extends Plugin {
       checkAndNotifyCaseConflict,
       DebugLogManager
     };
+
+    dump(`Fast Note Sync ${this.manifest.version}, fork build ${FORK_BUILD}`)
 
     // 注册自定义颜色图标 / Register custom colored icons
     resetFileOperations()
