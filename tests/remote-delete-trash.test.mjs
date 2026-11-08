@@ -108,3 +108,16 @@ for (const [kind, handler] of [['note', note.receiveNoteSyncRename], ['file', fi
 }
 assert.equal(permanentCalls, 0, 'no fallback to permanent removal on any error path');
 console.log('PASS: rename targets are recoverable and trash failures abort replacement');
+
+// Cloud preview avoids downloads only; a server deletion must still reach an existing local copy.
+for (const restricted of [true, false]) {
+  const f = fixture('file');
+  f.item.path = 'image.png';
+  f.p.settings.cloudPreviewEnabled = true;
+  f.p.settings.cloudPreviewTypeRestricted = restricted;
+  f.p.localStorageManager.getMetadata = key => key === 'isInitSync' ? true : 0;
+  await file.receiveFileSyncDelete({ path: 'image.png', pageIndex: 1 }, f.p);
+  assert.equal(f.calls.length, 1, 'cloud preview must not skip remote deletions');
+  assert.deepEqual(f.completed, [['file', 1]]);
+}
+console.log('PASS: remote deletions apply with cloud preview enabled');
