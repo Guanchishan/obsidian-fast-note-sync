@@ -21,6 +21,7 @@ for (const initialized of [false, true]) {
       localStorageManager: { getMetadata: () => initialized },
       recordSyncCompleted: () => completed++,
       fileDownloadSessions: new Map(),
+      app: { vault: { getFileByPath: () => null } },
       totalFilesToDownload: 0,
       websocket: { SendMessage: async () => { sends++; } },
       concurrencyLimiter: { waitForSlot: async () => { slots++; return true; }, releaseSlot() {} },
